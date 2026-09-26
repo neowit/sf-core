@@ -5,6 +5,7 @@ import {
     ActionCounts,
     TelemetryBatch,
     isTelemetryAction,
+    isTelemetryNumericField,
     toTelemetryBatch,
 } from './types';
 import { isProcessAlive as defaultIsProcessAlive } from './state';
@@ -22,6 +23,7 @@ export type TelemetryStoreOptions<Action extends string> = {
     os: string;
     appVersion: string;
     actions: readonly Action[];
+    numericFields?: readonly string[];
     pid?: number;
     debounceMs?: number;
     isProcessAlive?: (pid: number) => boolean;
@@ -30,6 +32,7 @@ export type TelemetryStoreOptions<Action extends string> = {
 export type TelemetryStore<Action extends string> = {
     add(action: Action): void;
     addMany(action: Action, count: number): void;
+    addNumericField(field: string, value: number): void;
     snapshot(): ActionCounts<Action>;
     flushDraft(): Promise<void>;
     sealCurrentBatch(): Promise<TelemetryBatch<Action> | null>;
@@ -46,6 +49,7 @@ export function createTelemetryStore<Action extends string>(
     const debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     const probe = opts.isProcessAlive ?? defaultIsProcessAlive;
     const actions = opts.actions;
+    const numericFields = opts.numericFields ?? [];
     const telemetryDir = path.join(opts.stateDir, 'telemetry');
     const draftsDir = path.join(telemetryDir, 'drafts');
     const sessionsDir = path.join(telemetryDir, 'sessions');
@@ -54,6 +58,7 @@ export function createTelemetryStore<Action extends string>(
     const markerFile = path.join(sessionsDir, opts.sessionId + JSON_SUFFIX);
 
     let counts: ActionCounts<Action> = {};
+    let numericValues: Record<string, number> = {};
     let batchId = randomUUID();
     let lastPersisted: TelemetryBatch<Action> | null = null;
     let dirty = false;
@@ -84,6 +89,23 @@ export function createTelemetryStore<Action extends string>(
 
     function add(action: Action): void {
         addMany(action, 1);
+    }
+
+    function addNumericField(field: string, value: number): void {
+        if (!isTelemetryNumericField(field, value, numericFields)) {
+            return;
+        }
+        numericValues[field] = value;
+        dirty = true;
+        if (timer === null) {
+            timer = setTimeout(() => {
+                timer = null;
+                void scheduleDraftWrite();
+            }, debounceMs);
+            if (typeof timer.unref === 'function') {
+                timer.unref();
+            }
+        }
     }
 
     function scheduleDraftWrite(): Promise<void> {
@@ -117,6 +139,7 @@ export function createTelemetryStore<Action extends string>(
                 os: opts.os,
                 appVersion: opts.appVersion,
                 actionCounts: { ...counts },
+                ...numericValues,
             };
             tmp = path.join(
                 draftsDir,
@@ -157,7 +180,11 @@ export function createTelemetryStore<Action extends string>(
     async function sealCurrentBatch(): Promise<TelemetryBatch<Action> | null> {
         try {
             await flushDraft();
-            if (dirty || Object.keys(counts).length === 0 || lastPersisted === null) {
+            if (
+                dirty ||
+                (Object.keys(counts).length === 0 && Object.keys(numericValues).length === 0) ||
+                lastPersisted === null
+            ) {
                 return null;
             }
             // The sealed payload is the already-persisted draft snapshot,
@@ -186,7 +213,12 @@ export function createTelemetryStore<Action extends string>(
                     counts[key] = current - (sealedCount as number);
                 }
             }
-            if (Object.keys(counts).length > 0) {
+            for (const field of numericFields) {
+                if (numericValues[field] === sealed[field]) {
+                    delete numericValues[field];
+                }
+            }
+            if (Object.keys(counts).length > 0 || Object.keys(numericValues).length > 0) {
                 dirty = true;
             }
             batchId = randomUUID();
@@ -207,7 +239,7 @@ export function createTelemetryStore<Action extends string>(
         }
         let batch: TelemetryBatch<Action> | null = null;
         try {
-            batch = toTelemetryBatch(JSON.parse(raw), actions);
+            batch = toTelemetryBatch(JSON.parse(raw), actions, numericFields);
         } catch {
             batch = null;
         }
@@ -338,7 +370,7 @@ export function createTelemetryStore<Action extends string>(
                 }
                 let batch: TelemetryBatch<Action> | null = null;
                 try {
-                    batch = toTelemetryBatch(JSON.parse(raw), actions);
+                    batch = toTelemetryBatch(JSON.parse(raw), actions, numericFields);
                 } catch {
                     batch = null;
                 }
@@ -392,6 +424,7 @@ export function createTelemetryStore<Action extends string>(
     return {
         add,
         addMany,
+        addNumericField,
         snapshot,
         flushDraft,
         sealCurrentBatch,

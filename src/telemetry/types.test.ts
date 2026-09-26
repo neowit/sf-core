@@ -1,4 +1,4 @@
-import { isTelemetryAction, toTelemetryBatch } from './types';
+import { isTelemetryAction, isTelemetryNumericField, toTelemetryBatch } from './types';
 
 const ACTIONS = ['compile', 'navigate'] as const;
 type Action = (typeof ACTIONS)[number];
@@ -63,6 +63,36 @@ describe('telemetry types', () => {
             'os',
             'schemaVersion',
         ]);
+    });
+
+    it('keeps only explicitly allowlisted safe numeric top-level fields', () => {
+        const field = 'apexsense-ready-in-sec';
+        expect(
+            toTelemetryBatch({ ...VALID_BATCH, [field]: 11, debug: true }, ACTIONS, [field]),
+        ).toEqual({ ...VALID_BATCH, [field]: 11 });
+        expect(toTelemetryBatch({ ...VALID_BATCH, [field]: 0 }, ACTIONS, [field])).toEqual({
+            ...VALID_BATCH,
+            [field]: 0,
+        });
+        for (const bad of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '11']) {
+            expect(toTelemetryBatch({ ...VALID_BATCH, [field]: bad }, ACTIONS, [field])).toEqual(
+                VALID_BATCH,
+            );
+        }
+        expect(toTelemetryBatch({ ...VALID_BATCH, [field]: 11 }, ACTIONS)).toEqual(VALID_BATCH);
+    });
+
+    it('does not allow reserved keys or unlisted numeric fields', () => {
+        expect(isTelemetryNumericField('clientId', 8, ['clientId'])).toBe(false);
+        expect(isTelemetryNumericField('__proto__', 8, ['__proto__'])).toBe(false);
+        expect(isTelemetryNumericField('debug', 8, ['metric'])).toBe(false);
+        expect(
+            toTelemetryBatch(
+                { ...VALID_BATCH, clientId: 8, metric: 8 },
+                ACTIONS,
+                ['clientId', 'metric'],
+            ),
+        ).toBeNull();
     });
 
     it('keeps valid non-negative safe-integer counts including zero', () => {

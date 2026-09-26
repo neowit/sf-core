@@ -10,6 +10,8 @@ import type { TelemetryStore } from './store';
 
 const ACTIONS = ['compile', 'navigate'] as const;
 type TestAction = (typeof ACTIONS)[number];
+const READY_FIELD = 'apexsense-ready-in-sec';
+const OTHER_NUMERIC_FIELD = 'apexsense-startup-marker';
 
 const ENDPOINT = 'https://usage.invalid/collect';
 const PAYLOAD_HEADER = 'X-Client-Payload-Version';
@@ -78,6 +80,123 @@ describe('telemetryService', () => {
         expect(batch.actionCounts).toEqual({ compile: 3 });
         expect(batch.schemaVersion).toBe(1);
         await svc.shutdown();
+    });
+
+    test('buffers numeric fields before, during, and after start and sends them with actions', async () => {
+        jest.useFakeTimers();
+        const stateDir = makeTempDir();
+        const sender = jest.fn().mockResolvedValue('acked');
+        const svc = createTelemetryService<TestAction>(
+            baseOptions({ stateDir, sender, numericFields: [READY_FIELD, OTHER_NUMERIC_FIELD] }),
+        );
+
+        svc.recordNumericField(READY_FIELD, 7);
+        const starting = svc.start();
+        svc.recordNumericField(OTHER_NUMERIC_FIELD, 11);
+        svc.record('compile');
+        await starting;
+        svc.recordNumericField(READY_FIELD, 13);
+        await advance(30000);
+
+        expect(sender).toHaveBeenCalledTimes(1);
+        expect(sender.mock.calls[0][0]).toMatchObject({
+            actionCounts: { compile: 1 },
+            [READY_FIELD]: 13,
+            [OTHER_NUMERIC_FIELD]: 11,
+        });
+        await svc.shutdown();
+    });
+
+    test('uploads a metric-only batch and retains the same value and batch ID across retry', async () => {
+        jest.useFakeTimers();
+        const stateDir = makeTempDir();
+        let outcome: 'retry' | 'acked' = 'retry';
+        const sender = jest.fn().mockImplementation(() => Promise.resolve(outcome));
+        const svc = createTelemetryService<TestAction>(
+            baseOptions({ stateDir, sender, numericFields: [READY_FIELD], firstDelayMs: 1000, intervalMs: 1000 }),
+        );
+
+        await svc.start();
+        svc.recordNumericField(READY_FIELD, 11);
+        await advance(1000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        const first = sender.mock.calls[0][0];
+        expect(first.actionCounts).toEqual({});
+        expect(first[READY_FIELD]).toBe(11);
+        await advance(1000);
+        expect(sender).toHaveBeenCalledTimes(1);
+
+        outcome = 'acked';
+        await advance(60000);
+        expect(sender.mock.calls.length).toBeGreaterThanOrEqual(2);
+        for (const [batch] of sender.mock.calls) {
+            expect(batch.batchId).toBe(first.batchId);
+            expect(batch[READY_FIELD]).toBe(11);
+            expect(batch.actionCounts).toEqual({});
+        }
+        expect(fs.existsSync(path.join(pendingDir(stateDir), first.batchId + '.json'))).toBe(false);
+        await svc.shutdown();
+    });
+
+    test('recovers a metric-only draft once after shutdown and restart', async () => {
+        jest.useFakeTimers();
+        const stateDir = makeTempDir();
+        const first = createTelemetryService<TestAction>(
+            baseOptions({ stateDir, numericFields: [READY_FIELD], firstDelayMs: 60000 }),
+        );
+        await first.start();
+        first.recordNumericField(READY_FIELD, 11);
+        await first.shutdown();
+
+        const sender = jest.fn().mockResolvedValue('acked');
+        const restarted = createTelemetryService<TestAction>(
+            baseOptions({ stateDir, numericFields: [READY_FIELD], firstDelayMs: 1000, sender }),
+        );
+        await restarted.start();
+        await advance(1000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        expect(sender.mock.calls[0][0].actionCounts).toEqual({});
+        expect(sender.mock.calls[0][0][READY_FIELD]).toBe(11);
+        await advance(1000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        await restarted.shutdown();
+    });
+
+    test('ignores invalid and reserved numeric fields, and disabled telemetry never records or sends', async () => {
+        jest.useFakeTimers();
+        const stateDir = makeTempDir();
+        const sender = jest.fn().mockResolvedValue('acked');
+        const svc = createTelemetryService<TestAction>(
+            baseOptions({ enabled: false, stateDir, sender, numericFields: [READY_FIELD] }),
+        );
+        for (const [field, value] of [
+            [READY_FIELD, -1],
+            [READY_FIELD, 1.5],
+            [READY_FIELD, Number.MAX_SAFE_INTEGER + 1],
+            ['unknown-field', 11],
+            ['clientId', 8],
+            [undefined, 11],
+        ] as const) {
+            expect(() => svc.recordNumericField(field, value)).not.toThrow();
+        }
+        expect(() => svc.recordNumericField(READY_FIELD, 11)).not.toThrow();
+        await svc.start();
+        await advance(3600000);
+        expect(sender).not.toHaveBeenCalled();
+        expect(fs.existsSync(path.join(stateDir, 'client-id'))).toBe(false);
+        await svc.shutdown();
+        expect(() => svc.recordNumericField(READY_FIELD, 11)).not.toThrow();
+
+        const failedStateDir = path.join(stateDir, 'not-a-dir');
+        fs.writeFileSync(failedStateDir, 'x');
+        const selfDisabled = createTelemetryService<TestAction>(
+            baseOptions({ stateDir: failedStateDir, sender, numericFields: [READY_FIELD] }),
+        );
+        await selfDisabled.start();
+        expect(() => selfDisabled.recordNumericField(READY_FIELD, 11)).not.toThrow();
+        await advance(3600000);
+        expect(sender).not.toHaveBeenCalled();
+        await selfDisabled.shutdown();
     });
 
     test('saturates pre-start counts at 1000 and sends the bounded aggregate', async () => {
@@ -191,6 +310,7 @@ describe('telemetryService', () => {
         const store: TelemetryStore<TestAction> = {
             add: jest.fn(),
             addMany: jest.fn(),
+            addNumericField: jest.fn(),
             snapshot: jest.fn().mockReturnValue({}),
             flushDraft: jest.fn().mockResolvedValue(undefined),
             sealCurrentBatch: jest.fn().mockResolvedValue(null),

@@ -7,7 +7,7 @@ export type TelemetryBatch<Action extends string> = {
     os: string;
     appVersion: string;
     actionCounts: ActionCounts<Action>;
-};
+} & Record<string, unknown>;
 
 export const TELEMETRY_SCHEMA_VERSION = 1;
 
@@ -24,9 +24,24 @@ export function isTelemetryAction<Action extends string>(
     return typeof value === 'string' && (actions as readonly string[]).includes(value);
 }
 
+const RESERVED_TELEMETRY_FIELDS = [
+    'schemaVersion', 'batchId', 'clientId', 'os', 'appVersion', 'actionCounts',
+    '__proto__', 'prototype', 'constructor',
+];
+
+export function isTelemetryNumericField(
+    field: string,
+    value: unknown,
+    fields: readonly string[],
+): value is number {
+    return fields.includes(field) && !RESERVED_TELEMETRY_FIELDS.includes(field) &&
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 export function toTelemetryBatch<Action extends string>(
     raw: unknown,
     actions: readonly Action[],
+    numericFields: readonly string[] = [],
 ): TelemetryBatch<Action> | null {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
         return null;
@@ -65,5 +80,13 @@ export function toTelemetryBatch<Action extends string>(
         }
         clean[key] = value;
     }
-    return { schemaVersion: 1, batchId, clientId, os, appVersion, actionCounts: clean };
+    const cleanBatch: TelemetryBatch<Action> = {
+        schemaVersion: 1, batchId, clientId, os, appVersion, actionCounts: clean,
+    };
+    for (const field of numericFields) {
+        if (isTelemetryNumericField(field, obj[field], numericFields)) {
+            cleanBatch[field] = obj[field];
+        }
+    }
+    return cleanBatch;
 }

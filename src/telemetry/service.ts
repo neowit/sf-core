@@ -1,5 +1,11 @@
 import { randomUUID } from 'crypto';
-import { ActionCounts, TelemetryBatch, isTelemetryAction, toTelemetryBatch } from './types';
+import {
+    ActionCounts,
+    TelemetryBatch,
+    isTelemetryAction,
+    isTelemetryNumericField,
+    toTelemetryBatch,
+} from './types';
 import { loadOrCreateClientId, purgeTelemetryState } from './state';
 import { createTelemetryStore, TelemetryStore } from './store';
 import { sendTelemetryBatch } from './transport';
@@ -22,6 +28,7 @@ export type TelemetryServiceOptions<Action extends string> = {
     actions: readonly Action[];
     endpoint: string;
     payloadHeader: string;
+    numericFields?: readonly string[];
     firstDelayMs?: number;
     intervalMs?: number;
     sender?: TelemetryServiceSender<Action>;
@@ -30,6 +37,7 @@ export type TelemetryServiceOptions<Action extends string> = {
 
 export type TelemetryService = {
     record(action: unknown): void;
+    recordNumericField(field: unknown, value: unknown): void;
     start(): Promise<void>;
     shutdown(): Promise<void>;
 };
@@ -57,6 +65,7 @@ export function createTelemetryService<Action extends string>(
     let timer: NodeJS.Timeout | null = null;
     let failures = 0;
     let buffered: ActionCounts<Action> = {};
+    let bufferedFields: Record<string, number> = {};
 
     function schedule(delayMs: number): void {
         try {
@@ -133,7 +142,7 @@ export function createTelemetryService<Action extends string>(
                 }
                 let clean;
                 try {
-                    clean = toTelemetryBatch(raw, opts.actions);
+                    clean = toTelemetryBatch(raw, opts.actions, opts.numericFields ?? []);
                 } catch {
                     await deleteInvalidPendingBatch(raw);
                     continue;
@@ -198,6 +207,27 @@ export function createTelemetryService<Action extends string>(
         }
     }
 
+    function recordNumericField(field: unknown, value: unknown): void {
+        try {
+            if (
+                typeof field !== 'string' ||
+                !isTelemetryNumericField(field, value, opts.numericFields ?? []) ||
+                !opts.enabled ||
+                selfDisabled ||
+                shut
+            ) {
+                return;
+            }
+            if (store !== null && started) {
+                store.addNumericField(field, value);
+                return;
+            }
+            bufferedFields[field] = value;
+        } catch {
+            // never throws
+        }
+    }
+
     async function init(): Promise<void> {
         if (!opts.enabled) {
             try {
@@ -225,6 +255,7 @@ export function createTelemetryService<Action extends string>(
                 os: opts.os,
                 appVersion: opts.appVersion,
                 actions: opts.actions,
+                numericFields: opts.numericFields,
             });
             try {
                 await created.recoverOrphanedDrafts();
@@ -246,6 +277,17 @@ export function createTelemetryService<Action extends string>(
                     }
                 } catch {
                     // per-action fail closed; never throws
+                }
+            }
+            const pendingFields = bufferedFields;
+            bufferedFields = {};
+            for (const [field, value] of Object.entries(pendingFields)) {
+                try {
+                    if (isTelemetryNumericField(field, value, opts.numericFields ?? []) && !shut) {
+                        created.addNumericField(field, value);
+                    }
+                } catch {
+                    // per-field fail closed; never throws
                 }
             }
             if (!shut) {
@@ -311,5 +353,5 @@ export function createTelemetryService<Action extends string>(
         }
     }
 
-    return { record, start, shutdown };
+    return { record, recordNumericField, start, shutdown };
 }

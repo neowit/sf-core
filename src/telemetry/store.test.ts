@@ -44,6 +44,7 @@ function makeStore(
         pid: number;
         debounceMs: number;
         isProcessAlive: (pid: number) => boolean;
+        numericFields: readonly string[];
     }>
 ) {
     const store = createTelemetryStore<TestAction>({
@@ -113,6 +114,27 @@ afterEach(async () => {
 });
 
 describe('draft persistence', () => {
+    test('persists and seals an allowlisted metric-only batch', async () => {
+        const dir = makeTmpDir();
+        const field = 'apexsense-ready-in-sec';
+        const store = makeStore(dir, { numericFields: [field] });
+        store.addNumericField(field, 11);
+        store.addNumericField('clientId', 99);
+        store.addNumericField(field, 1.5);
+        expect(store.snapshot()).toEqual({});
+        await store.flushDraft();
+
+        const draft = JSON.parse(fs.readFileSync(draftPath(dir, 'sess-test-one'), 'utf8'));
+        expect(draft[field]).toBe(11);
+        expect(draft.clientId).toBe(CLIENT_ID);
+        const sealed = await store.sealCurrentBatch();
+        expect(sealed?.[field]).toBe(11);
+        expect(sealed?.actionCounts).toEqual({});
+        expect(JSON.parse(fs.readFileSync(path.join(pendingDir(dir), sealed!.batchId + '.json'), 'utf8')))
+            .toEqual(sealed);
+        expect(await store.sealCurrentBatch()).toBeNull();
+    });
+
     test('add then flush persists a six-field draft and a marker first', async () => {
         const dir = makeTmpDir();
         const store = makeStore(dir);
@@ -191,6 +213,25 @@ describe('draft persistence', () => {
 });
 
 describe('orphan recovery', () => {
+    test('recovery and pending reads retain only configured valid numeric fields', async () => {
+        const dir = makeTmpDir();
+        const field = 'apexsense-ready-in-sec';
+        const first = makeStore(dir, { sessionId: 'sess-metric', pid: reapedPid(), numericFields: [field] });
+        first.addNumericField(field, 11);
+        await first.flushDraft();
+        const raw = JSON.parse(fs.readFileSync(draftPath(dir, 'sess-metric'), 'utf8'));
+        raw.debug = true;
+        fs.writeFileSync(draftPath(dir, 'sess-metric'), JSON.stringify(raw), 'utf8');
+
+        const second = makeStore(dir, { sessionId: 'sess-reader', numericFields: [field] });
+        await second.recoverOrphanedDrafts();
+        const batches = await second.listPendingBatches();
+        expect(batches).toHaveLength(1);
+        expect(batches[0][field]).toBe(11);
+        expect(batches[0].clientId).toBe(CLIENT_ID);
+        expect(batches[0]).not.toHaveProperty('debug');
+    });
+
     test('dead session draft moves to pending with the same batch id', async () => {
         const dir = makeTmpDir();
         const first = makeStore(dir, {
@@ -258,6 +299,43 @@ describe('orphan recovery', () => {
 });
 
 describe('sealCurrentBatch', () => {
+    test('retains updated metric and an action added during the pending rename', async () => {
+        const dir = makeTmpDir();
+        const field = 'apexsense-ready-in-sec';
+        const store = makeStore(dir, { numericFields: [field] });
+        store.addNumericField(field, 11);
+        const pending = pendingDir(dir);
+        const originalRename = actualFsPromises.rename;
+        let boundaryHit = false;
+        const spy = jest.spyOn(mockedFsPromises, 'rename').mockImplementation((async (
+            source: any,
+            destination: any
+        ) => {
+            if (!boundaryHit && typeof destination === 'string' && destination.startsWith(pending + path.sep)) {
+                boundaryHit = true;
+                store.addNumericField(field, 12);
+                store.add('navigate');
+            }
+            return (originalRename as any)(source, destination);
+        }) as typeof fsPromises.rename);
+        let sealed: TelemetryBatch<TestAction> | null;
+        try {
+            sealed = await store.sealCurrentBatch();
+        } finally {
+            spy.mockRestore();
+        }
+
+        expect(boundaryHit).toBe(true);
+        expect(sealed?.[field]).toBe(11);
+        expect(JSON.parse(fs.readFileSync(path.join(pending, sealed!.batchId + '.json'), 'utf8')))
+            .toEqual(sealed);
+        expect(store.snapshot()).toEqual({ navigate: 1 });
+        await store.flushDraft();
+        const nextDraft = JSON.parse(fs.readFileSync(draftPath(dir, 'sess-test-one'), 'utf8'));
+        expect(nextDraft[field]).toBe(12);
+        expect(nextDraft.actionCounts).toEqual({ navigate: 1 });
+    });
+
     test('seal moves the draft to pending and starts a fresh batch', async () => {
         const dir = makeTmpDir();
         const store = makeStore(dir);
