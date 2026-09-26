@@ -4,7 +4,9 @@ import * as path from 'path';
 import * as telemetryStore from './store';
 import * as telemetryTypes from './types';
 import * as transport from './transport';
-import { createTelemetryService } from './service';
+import { createTelemetryService, type TelemetryServiceOptions } from './service';
+import type { TelemetryBatch } from './types';
+import type { TelemetryStore } from './store';
 
 const ACTIONS = ['compile', 'navigate'] as const;
 type TestAction = (typeof ACTIONS)[number];
@@ -23,7 +25,9 @@ function pendingDir(stateDir: string): string {
     return path.join(stateDir, 'telemetry', 'pending');
 }
 
-function baseOptions(overrides?: Record<string, unknown>) {
+function baseOptions(
+    overrides: Partial<TelemetryServiceOptions<TestAction>> & Pick<TelemetryServiceOptions<TestAction>, 'stateDir'>,
+): TelemetryServiceOptions<TestAction> {
     return {
         enabled: true,
         appVersion: '1.2.3',
@@ -59,7 +63,7 @@ describe('telemetryService', () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
         const sender = jest.fn().mockResolvedValue('acked');
-        const svc = createTelemetryService<TestAction>(baseOptions({ stateDir, sender }) as never);
+        const svc = createTelemetryService<TestAction>(baseOptions({ stateDir, sender }));
         expect(() => svc.record('compile')).not.toThrow();
         const starting = svc.start();
         expect(() => svc.record('compile')).not.toThrow();
@@ -80,7 +84,7 @@ describe('telemetryService', () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
         const sender = jest.fn().mockResolvedValue('acked');
-        const svc = createTelemetryService<TestAction>(baseOptions({ stateDir, sender }) as never);
+        const svc = createTelemetryService<TestAction>(baseOptions({ stateDir, sender }));
         for (let i = 0; i < 1002; i++) {
             svc.record('compile');
         }
@@ -96,14 +100,16 @@ describe('telemetryService', () => {
         const stateDir = makeTempDir();
         const createStore = telemetryStore.createTelemetryStore;
         const storeSpies: { add?: jest.SpyInstance; addMany?: jest.SpyInstance } = {};
-        const createStoreSpy = jest.spyOn(telemetryStore, 'createTelemetryStore').mockImplementation((options) => {
-            const store = createStore(options as never);
-            storeSpies.add = jest.spyOn(store, 'add');
-            storeSpies.addMany = jest.spyOn(store, 'addMany');
-            return store as never;
-        });
+        const createStoreSpy = jest
+            .spyOn(telemetryStore, 'createTelemetryStore')
+            .mockImplementation((options) => {
+                const store = createStore(options);
+                storeSpies.add = jest.spyOn(store, 'add');
+                storeSpies.addMany = jest.spyOn(store, 'addMany');
+                return store;
+            });
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, sender: jest.fn().mockResolvedValue('acked') }) as never,
+            baseOptions({ stateDir, sender: jest.fn().mockResolvedValue('acked') }),
         );
 
         try {
@@ -135,7 +141,7 @@ describe('telemetryService', () => {
         fs.writeFileSync(path.join(stateDir, 'other.json'), '{"a":1}');
         const sender = jest.fn().mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ enabled: false, stateDir, sender }) as never,
+            baseOptions({ enabled: false, stateDir, sender }),
         );
         await svc.start();
         expect(fs.existsSync(path.join(stateDir, 'client-id'))).toBe(false);
@@ -152,7 +158,7 @@ describe('telemetryService', () => {
         let mode: 'retry' | 'acked' = 'retry';
         const sender = jest.fn().mockImplementation(() => Promise.resolve(mode));
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }),
         );
         await svc.start();
         svc.record('compile');
@@ -173,7 +179,7 @@ describe('telemetryService', () => {
     test('deletes a pending batch that fails defensive validation without retrying it', async () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
-        const batch = {
+        const batch: TelemetryBatch<TestAction> = {
             schemaVersion: 1 as const,
             batchId: VALID_BATCH_ID,
             clientId: VALID_CLIENT_ID,
@@ -181,8 +187,8 @@ describe('telemetryService', () => {
             appVersion: '1.2.3',
             actionCounts: { compile: 1 },
         };
-        let pending = [batch];
-        const store = {
+        let pending: TelemetryBatch<TestAction>[] = [batch];
+        const store: TelemetryStore<TestAction> = {
             add: jest.fn(),
             addMany: jest.fn(),
             snapshot: jest.fn().mockReturnValue({}),
@@ -198,11 +204,11 @@ describe('telemetryService', () => {
         };
         const createStoreSpy = jest
             .spyOn(telemetryStore, 'createTelemetryStore')
-            .mockReturnValue(store as never);
+            .mockReturnValue(store);
         const validationSpy = jest.spyOn(telemetryTypes, 'toTelemetryBatch').mockReturnValue(null);
         const sender = jest.fn().mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }),
         );
 
         try {
@@ -227,7 +233,7 @@ describe('telemetryService', () => {
             throw new Error('boom');
         });
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }),
         );
         expect(() => svc.record('compile')).not.toThrow();
         await expect(svc.start()).resolves.toBeUndefined();
@@ -243,7 +249,7 @@ describe('telemetryService', () => {
         const stateDir = makeTempDir();
         const sender = jest.fn().mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 60000, sender }) as never,
+            baseOptions({ stateDir, firstDelayMs: 60000, sender }),
         );
         await svc.start();
         svc.record('navigate');
@@ -264,7 +270,7 @@ describe('telemetryService', () => {
         const stateDir = makeTempDir();
         const sender = jest.fn().mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, sender }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, sender }),
         );
         await svc.start();
         fs.mkdirSync(pendingDir(stateDir), { recursive: true });
@@ -317,7 +323,7 @@ describe('telemetryService', () => {
         fs.writeFileSync(filePath, 'x');
         const sender = jest.fn().mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir: filePath, firstDelayMs: 1000, intervalMs: 1000, sender }) as never,
+            baseOptions({ stateDir: filePath, firstDelayMs: 1000, intervalMs: 1000, sender }),
         );
         await expect(svc.start()).resolves.toBeUndefined();
         expect(() => svc.record('compile')).not.toThrow();
@@ -334,7 +340,7 @@ describe('telemetryService', () => {
             const stateDir = makeTempDir();
             const sender = jest.fn().mockResolvedValue('retry');
             const svc = createTelemetryService<TestAction>(
-                baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 21600000, sender }) as never,
+                baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 21600000, sender }),
             );
             await svc.start();
             svc.record('compile');
@@ -352,9 +358,9 @@ describe('telemetryService', () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
         const fetchImpl = jest.fn().mockResolvedValue({ ok: true, status: 200 });
-        const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as never);
+        const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as unknown as typeof fetch);
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 600000 }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 600000 }),
         );
         try {
             await svc.start();
@@ -376,7 +382,7 @@ describe('telemetryService', () => {
         const requestLogger = jest.fn();
         const sendSpy = jest.spyOn(transport, 'sendTelemetryBatch').mockResolvedValue('acked');
         const svc = createTelemetryService<TestAction>(
-            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 600000, requestLogger }) as never,
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 600000, requestLogger }),
         );
         try {
             await svc.start();
