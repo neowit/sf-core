@@ -39,7 +39,7 @@ export async function acquireProjectOwnership(options: ProjectOwnershipOptions):
         return { status: 'error', error: toError(error) };
     }
 
-    const server = net.createServer();
+    const server = net.createServer((socket) => socket.destroy());
     let resolveClosed!: (error: Error) => void;
     const closed = new Promise<Error>((resolve) => { resolveClosed = resolve; });
     let acquired = false;

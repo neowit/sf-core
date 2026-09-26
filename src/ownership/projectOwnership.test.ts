@@ -1,4 +1,5 @@
 import * as childProcess from 'child_process';
+import { once } from 'events';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
@@ -290,6 +291,28 @@ describe('project ownership', () => {
         const reacquired = await api.acquireProjectOwnership({ applicationId: 'apexsense-lsp', projectRoot: root });
         expect(reacquired.status).toBe('acquired');
         if (reacquired.status === 'acquired') await reacquired.ownership.release();
+    });
+
+    test('release completes while a local client keeps its connection idle', async () => {
+        const root = tempDir();
+        const result = await api.acquireProjectOwnership({ applicationId: 'apexsense-lsp', projectRoot: root });
+        expect(result.status).toBe('acquired');
+        if (result.status !== 'acquired') return;
+
+        const client = net.connect(result.ownership.port, '127.0.0.1');
+        let timer: NodeJS.Timeout | undefined;
+        try {
+            await once(client, 'connect');
+            const outcome = await Promise.race([
+                result.ownership.release().then(() => 'released'),
+                new Promise<string>((resolve) => { timer = setTimeout(() => resolve('blocked'), 1500); }),
+            ]);
+            expect(outcome).toBe('released');
+        } finally {
+            if (timer) clearTimeout(timer);
+            client.destroy();
+            await result.ownership.release();
+        }
     });
 
     test('unexpected close and error resolve closed with an Error', async () => {
