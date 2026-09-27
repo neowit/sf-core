@@ -11,6 +11,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "jest --config jest.config.cjs --runInBand"
   },
+  "dependencies": {
+    "@salesforce/core": "8.21.0"
+  },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
