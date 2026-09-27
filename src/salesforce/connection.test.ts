@@ -198,6 +198,42 @@ describe('requestRest', () => {
 });
 
 describe('abort signal', () => {
+    it('isolates a caller abort from shared connection creation', async () => {
+        const conn = createMockConnection();
+        conn.request.mockResolvedValue({ ok: true });
+        let startAuth: () => void = () => undefined;
+        const authStarted = new Promise<void>((resolve) => {
+            startAuth = resolve;
+        });
+        let releaseAuth: () => void = () => undefined;
+        const authGate = new Promise<void>((resolve) => {
+            releaseAuth = resolve;
+        });
+        mockAuthCreate.mockImplementation(async () => {
+            startAuth();
+            await authGate;
+            return { id: 'auth' };
+        });
+        mockConnCreate.mockResolvedValue(conn);
+
+        const controller = new AbortController();
+        const toolingPromise = getToolingConnection('C:/root', 'user@example.com', controller.signal);
+        await authStarted;
+        const restPromise = requestRest('C:/root', 'user@example.com', {
+            url: '/services/data/v67.0/composite/batch',
+            method: 'POST',
+            body: '{"batchRequests":[]}',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        controller.abort();
+        releaseAuth();
+
+        await expect(toolingPromise).rejects.toThrow('aborted');
+        await expect(restPromise).resolves.toEqual({ ok: true });
+        expect(mockAuthCreate).toHaveBeenCalledTimes(1);
+        expect(mockConnCreate).toHaveBeenCalledTimes(1);
+    });
+
     it('prevents Tooling operations when already aborted', async () => {
         const conn = createMockConnection();
         mockAuthCreate.mockResolvedValue({ id: 'auth' });

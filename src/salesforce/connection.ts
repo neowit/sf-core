@@ -34,13 +34,9 @@ function checkAborted(signal?: AbortSignal): void {
     if (signal?.aborted) throw new Error('Operation aborted.');
 }
 
-async function createRawConnection(username: string, signal?: AbortSignal): Promise<RawConnection> {
-    checkAborted(signal);
+async function createRawConnection(username: string): Promise<RawConnection> {
     const authInfo = await SalesforceCore.AuthInfo.create({ username });
-    checkAborted(signal);
-    const connection = await SalesforceCore.Connection.create({ authInfo });
-    checkAborted(signal);
-    return connection;
+    return SalesforceCore.Connection.create({ authInfo });
 }
 
 function getCachedRawConnection(wsRoot: string, username: string, signal?: AbortSignal): Promise<RawConnection> {
@@ -52,13 +48,16 @@ function getCachedRawConnection(wsRoot: string, username: string, signal?: Abort
             return connection;
         });
     }
-    const connection = createRawConnection(username, signal);
+    const connection = createRawConnection(username);
     const entry: CacheEntry = { username, connection };
     connectionCache.set(wsRoot, entry);
     void connection.catch(() => {
         if (connectionCache.get(wsRoot) === entry) connectionCache.delete(wsRoot);
     });
-    return connection;
+    return connection.then((rawConnection) => {
+        checkAborted(signal);
+        return rawConnection;
+    });
 }
 
 function wrapConnection(wsRoot: string, username: string, connection: RawConnection): ToolingConnection {
