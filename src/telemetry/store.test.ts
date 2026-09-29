@@ -258,6 +258,40 @@ describe('orphan recovery', () => {
         expect(JSON.parse(fs.readFileSync(pendingFile, 'utf8'))).toEqual(original);
         expect(fs.existsSync(draftPath(dir, 'sess-one'))).toBe(false);
         expect(second.snapshot()).toEqual({});
+        expect(fs.existsSync(markerPath(dir, 'sess-one'))).toBe(false);
+    });
+
+    test('dead session marker without a draft is removed', async () => {
+        const dir = makeTmpDir();
+        const first = makeStore(dir, { sessionId: 'sess-one', pid: reapedPid() });
+        first.add('compile');
+        await first.flushDraft();
+        expect(fs.existsSync(markerPath(dir, 'sess-one'))).toBe(true);
+        fs.rmSync(draftPath(dir, 'sess-one'), { force: true });
+
+        const second = makeStore(dir, {
+            sessionId: 'sess-two',
+            isProcessAlive: () => false,
+        });
+        await second.recoverOrphanedDrafts();
+
+        expect(fs.existsSync(markerPath(dir, 'sess-one'))).toBe(false);
+        expect(fs.existsSync(pendingDir(dir))).toBe(false);
+    });
+
+    test('live session marker without a draft is kept', async () => {
+        const dir = makeTmpDir();
+        const first = makeStore(dir, { sessionId: 'sess-one', pid: process.pid });
+        first.add('compile');
+        await first.flushDraft();
+        fs.rmSync(draftPath(dir, 'sess-one'), { force: true });
+
+        const second = makeStore(dir, {
+            sessionId: 'sess-two',
+            isProcessAlive: () => true,
+        });
+        await second.recoverOrphanedDrafts();
+
         expect(fs.existsSync(markerPath(dir, 'sess-one'))).toBe(true);
     });
 
@@ -295,6 +329,7 @@ describe('orphan recovery', () => {
 
         expect(fs.readFileSync(draftPath(dir, 'sess-one'), 'utf8')).toBe(before);
         expect(fs.existsSync(pendingDir(dir))).toBe(false);
+        expect(fs.existsSync(markerPath(dir, 'sess-one'))).toBe(true);
     });
 });
 

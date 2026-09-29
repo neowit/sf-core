@@ -278,17 +278,43 @@ export function createTelemetryStore<Action extends string>(
 
     async function recoverOrphanedDrafts(): Promise<void> {
         try {
-            let names: string[];
+            let draftNames: string[];
             try {
-                names = await fs.readdir(draftsDir);
+                draftNames = await fs.readdir(draftsDir);
             } catch {
-                return;
+                draftNames = [];
             }
-            for (const name of names) {
+            let markerNames: string[];
+            try {
+                markerNames = await fs.readdir(sessionsDir);
+            } catch {
+                markerNames = [];
+            }
+            const draftIds = new Set<string>();
+            for (const name of draftNames) {
                 if (!name.startsWith(DRAFT_PREFIX) || !name.endsWith(JSON_SUFFIX)) {
                     continue;
                 }
                 const draftSessionId = name.slice(DRAFT_PREFIX.length, -JSON_SUFFIX.length);
+                if (draftSessionId) {
+                    draftIds.add(draftSessionId);
+                }
+            }
+            // Dead markers without a draft are visited too: shutdown removes
+            // the marker but a crash leaves it, and claiming moves the draft
+            // away while the marker stays. Without this sweep dead markers
+            // accumulate forever.
+            const sessionIds = new Set<string>(draftIds);
+            for (const name of markerNames) {
+                if (!name.endsWith(JSON_SUFFIX)) {
+                    continue;
+                }
+                const markerSessionId = name.slice(0, -JSON_SUFFIX.length);
+                if (markerSessionId) {
+                    sessionIds.add(markerSessionId);
+                }
+            }
+            for (const draftSessionId of sessionIds) {
                 if (!draftSessionId) {
                     continue;
                 }
@@ -338,7 +364,16 @@ export function createTelemetryStore<Action extends string>(
                     }
                     // ponytail: OS PID reuse can delay recovery until the
                     // reused PID exits; delayed, never duplicated or dropped.
-                    await claimDraft(name);
+                    if (draftIds.has(draftSessionId)) {
+                        await claimDraft(DRAFT_PREFIX + draftSessionId + JSON_SUFFIX);
+                    }
+                    if (!markerMissing) {
+                        try {
+                            await fs.unlink(path.join(sessionsDir, draftSessionId + JSON_SUFFIX));
+                        } catch {
+                            // marker cleanup is best-effort; never throws
+                        }
+                    }
                 } catch {
                     // per-file fail closed; continue with the next draft
                 }
