@@ -107,11 +107,10 @@ describe('telemetryService', () => {
         await svc.shutdown();
     });
 
-    test('uploads a metric-only batch and retains the same value and batch ID across retry', async () => {
+    test('deletes a metric-only batch after one send attempt', async () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
-        let outcome: 'retry' | 'acked' = 'retry';
-        const sender = jest.fn().mockImplementation(() => Promise.resolve(outcome));
+        const sender = jest.fn().mockResolvedValue('retry');
         const svc = createTelemetryService<TestAction>(
             baseOptions({ stateDir, sender, numericFields: [READY_FIELD], firstDelayMs: 1000, intervalMs: 1000 }),
         );
@@ -123,17 +122,12 @@ describe('telemetryService', () => {
         const first = sender.mock.calls[0][0];
         expect(first.actionCounts).toEqual({});
         expect(first[READY_FIELD]).toBe(11);
+        expect(fs.existsSync(path.join(pendingDir(stateDir), first.batchId + '.json'))).toBe(false);
         await advance(1000);
         expect(sender).toHaveBeenCalledTimes(1);
 
-        outcome = 'acked';
         await advance(60000);
-        expect(sender.mock.calls.length).toBeGreaterThanOrEqual(2);
-        for (const [batch] of sender.mock.calls) {
-            expect(batch.batchId).toBe(first.batchId);
-            expect(batch[READY_FIELD]).toBe(11);
-            expect(batch.actionCounts).toEqual({});
-        }
+        expect(sender).toHaveBeenCalledTimes(1);
         expect(fs.existsSync(path.join(pendingDir(stateDir), first.batchId + '.json'))).toBe(false);
         await svc.shutdown();
     });
@@ -271,11 +265,10 @@ describe('telemetryService', () => {
         await svc.shutdown();
     });
 
-    test('retry retains pending and backs off, ack deletes only that batch', async () => {
+    test('deletes an attempted batch when the sender reports retry and does not resend it', async () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
-        let mode: 'retry' | 'acked' = 'retry';
-        const sender = jest.fn().mockImplementation(() => Promise.resolve(mode));
+        const sender = jest.fn().mockResolvedValue('retry');
         const svc = createTelemetryService<TestAction>(
             baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 1000, sender }),
         );
@@ -285,12 +278,11 @@ describe('telemetryService', () => {
         expect(sender).toHaveBeenCalledTimes(1);
         const sentBatchId = sender.mock.calls[0][0].batchId as string;
         const pendingFile = path.join(pendingDir(stateDir), sentBatchId + '.json');
-        expect(fs.existsSync(pendingFile)).toBe(true);
+        expect(fs.existsSync(pendingFile)).toBe(false);
         await advance(1000);
         expect(sender).toHaveBeenCalledTimes(1);
-        mode = 'acked';
         await advance(60000);
-        expect(sender.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(sender).toHaveBeenCalledTimes(1);
         expect(fs.existsSync(pendingFile)).toBe(false);
         await svc.shutdown();
     });
@@ -346,7 +338,7 @@ describe('telemetryService', () => {
         }
     });
 
-    test('record never throws with throwing sender', async () => {
+    test('sender failures delete attempted batches and never escape record', async () => {
         jest.useFakeTimers();
         const stateDir = makeTempDir();
         const sender = jest.fn().mockImplementation(() => {
@@ -360,6 +352,9 @@ describe('telemetryService', () => {
         expect(() => svc.record('compile')).not.toThrow();
         expect(() => svc.record(undefined)).not.toThrow();
         await advance(2000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        const attemptedBatchId = sender.mock.calls[0][0].batchId as string;
+        expect(fs.existsSync(path.join(pendingDir(stateDir), attemptedBatchId + '.json'))).toBe(false);
         expect(() => svc.record('navigate')).not.toThrow();
         await svc.shutdown();
     });
@@ -453,25 +448,20 @@ describe('telemetryService', () => {
         await svc.shutdown();
     });
 
-    test('jittered retry delay never exceeds the six-hour cap', async () => {
+    test('later send cycles do not retry batches from failed attempts', async () => {
         jest.useFakeTimers();
-        const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.999999);
-        try {
-            const stateDir = makeTempDir();
-            const sender = jest.fn().mockResolvedValue('retry');
-            const svc = createTelemetryService<TestAction>(
-                baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 21600000, sender }),
-            );
-            await svc.start();
-            svc.record('compile');
-            await advance(1000);
-            expect(sender).toHaveBeenCalledTimes(1);
-            await advance(21600000);
-            expect(sender).toHaveBeenCalledTimes(2);
-            await svc.shutdown();
-        } finally {
-            randomSpy.mockRestore();
-        }
+        const stateDir = makeTempDir();
+        const sender = jest.fn().mockResolvedValue('retry');
+        const svc = createTelemetryService<TestAction>(
+            baseOptions({ stateDir, firstDelayMs: 1000, intervalMs: 21600000, sender }),
+        );
+        await svc.start();
+        svc.record('compile');
+        await advance(1000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        await advance(21600000);
+        expect(sender).toHaveBeenCalledTimes(1);
+        await svc.shutdown();
     });
 
     test('default sender posts to the supplied endpoint with the supplied header', async () => {

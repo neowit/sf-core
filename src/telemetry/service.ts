@@ -13,7 +13,6 @@ import type { TelemetryRequestLogger } from './transport';
 
 const FIRST_DELAY_MS = 30000;
 const INTERVAL_MS = 600000;
-const MAX_BACKOFF_MS = 21600000;
 const MAX_BUFFERED_ACTION_COUNT = 1000;
 
 export type TelemetryServiceSender<Action extends string> = (
@@ -63,7 +62,6 @@ export function createTelemetryService<Action extends string>(
     let startPromise: Promise<void> | null = null;
     let store: TelemetryStore<Action> | null = null;
     let timer: NodeJS.Timeout | null = null;
-    let failures = 0;
     let buffered: ActionCounts<Action> = {};
     let bufferedFields: Record<string, number> = {};
 
@@ -88,17 +86,6 @@ export function createTelemetryService<Action extends string>(
         }
     }
 
-    function backoffDelay(): number {
-        try {
-            const grown = interval * Math.pow(2, failures);
-            const capped = Math.min(grown, MAX_BACKOFF_MS);
-            const jittered = capped * (0.8 + 0.4 * Math.random());
-            return Math.max(1, Math.min(Math.floor(jittered), MAX_BACKOFF_MS));
-        } catch {
-            return interval;
-        }
-    }
-
     async function runCycle(): Promise<void> {
         if (shut || selfDisabled || !opts.enabled || store === null) {
             return;
@@ -118,11 +105,9 @@ export function createTelemetryService<Action extends string>(
                 return;
             }
             if (pending.length === 0) {
-                failures = 0;
                 schedule(interval);
                 return;
             }
-            let sawRetry = false;
             async function deleteInvalidPendingBatch(raw: unknown): Promise<void> {
                 try {
                     if (typeof raw !== 'object' || raw === null) {
@@ -151,29 +136,19 @@ export function createTelemetryService<Action extends string>(
                     await deleteInvalidPendingBatch(raw);
                     continue;
                 }
-                let outcome: 'acked' | 'retry' = 'retry';
                 try {
-                    outcome = await sender(clean);
+                    await sender(clean);
                 } catch {
-                    outcome = 'retry';
-                }
-                if (outcome === 'acked') {
+                    // A batch is consumed after one send attempt, even if transport fails.
+                } finally {
                     try {
                         await active.deletePendingBatch(clean.batchId);
                     } catch {
-                        // retain on failure; never throws
+                        // Cleanup is best-effort; never affect telemetry callers.
                     }
-                } else {
-                    sawRetry = true;
                 }
             }
-            if (sawRetry) {
-                failures += 1;
-                schedule(backoffDelay());
-            } else {
-                failures = 0;
-                schedule(interval);
-            }
+            schedule(interval);
         } catch {
             try {
                 schedule(interval);
