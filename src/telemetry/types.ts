@@ -1,3 +1,5 @@
+import * as os from 'os';
+
 export type ActionCounts<Action extends string> = Partial<Record<Action, number>>;
 
 export type TelemetryBatch<Action extends string> = {
@@ -11,7 +13,29 @@ export type TelemetryBatch<Action extends string> = {
 
 export const TELEMETRY_SCHEMA_VERSION = 1;
 
-export const TELEMETRY_PLATFORMS = ['darwin', 'linux', 'win32'] as const;
+// Short printable string: accepts os.version() output ('Windows 11 Pro')
+// as well as legacy platform values ('win32'). Rejects empty and control chars.
+const OS_RE = /^[ -~]{1,128}$/;
+
+// ponytail: os.version() already reports the real OS; process.platform
+// just says 'win32' on every Windows. Never throws.
+export function getTelemetryOs(): string {
+    try {
+        if (typeof os.version === 'function') {
+            const v = os.version().trim();
+            if (OS_RE.test(v)) {
+                return v;
+            }
+        }
+    } catch {
+        // fall through to platform
+    }
+    try {
+        return process.platform;
+    } catch {
+        return 'unknown';
+    }
+}
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -59,7 +83,7 @@ export function toTelemetryBatch<Action extends string>(
         return null;
     }
     const os = obj['os'];
-    if (typeof os !== 'string' || !(TELEMETRY_PLATFORMS as readonly string[]).includes(os)) {
+    if (typeof os !== 'string' || !OS_RE.test(os)) {
         return null;
     }
     const appVersion = obj['appVersion'];

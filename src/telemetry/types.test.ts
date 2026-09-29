@@ -145,7 +145,7 @@ describe('telemetry types', () => {
         const valid = { ...VALID_BATCH, actionCounts: { compile: 1 } };
         expect(toTelemetryBatch({ ...valid, batchId: 'not-a-uuid' }, ACTIONS)).toBe(null);
         expect(toTelemetryBatch({ ...valid, clientId: 'c1' }, ACTIONS)).toBe(null);
-        expect(toTelemetryBatch({ ...valid, os: 'plan9' }, ACTIONS)).toBe(null);
+        expect(toTelemetryBatch({ ...valid, os: '' }, ACTIONS)).toBe(null);
         expect(toTelemetryBatch({ ...valid, appVersion: '../evil 1.0' }, ACTIONS)).toBe(null);
         expect(toTelemetryBatch({ ...valid, appVersion: 'unknown' }, ACTIONS)).toEqual({
             ...valid,
