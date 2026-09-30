@@ -1,5 +1,5 @@
 import * as SalesforceCore from '@salesforce/core';
-import { getToolingConnection, requestRest, resetConnectionCacheForTests } from './connection';
+import { describeMetadataObjects, getToolingConnection, requestRest, resetConnectionCacheForTests } from './connection';
 
 jest.mock('@salesforce/core', () => ({
     AuthInfo: { create: jest.fn() },
@@ -23,6 +23,7 @@ type MockTooling = {
 type MockConnection = {
     tooling: MockTooling;
     request: jest.Mock;
+    metadata: { describe: jest.Mock };
 };
 
 function createMockConnection(): MockConnection {
@@ -38,7 +39,7 @@ function createMockConnection(): MockConnection {
             return entry;
         }),
     };
-    return { tooling, request: jest.fn() };
+    return { tooling, request: jest.fn(), metadata: { describe: jest.fn() } };
 }
 
 beforeEach(() => {
@@ -194,6 +195,77 @@ describe('requestRest', () => {
         mockAuthCreate.mockResolvedValue({ id: 'auth' });
         mockConnCreate.mockResolvedValue(conn);
         await expect(requestRest('C:/root', 'user@example.com', restRequest)).rejects.toThrow('bad request');
+    });
+});
+
+describe('describeMetadataObjects', () => {
+    it('normalizes metadata descriptions and drops rows with blank names', async () => {
+        const conn = createMockConnection();
+        conn.metadata.describe.mockResolvedValue({ metadataObjects: [
+            {
+                xmlName: ' CustomObject ',
+                directoryName: ' objects ',
+                suffix: 'object',
+                inFolder: false,
+                metaFile: true,
+                childXmlNames: [' fields ', ' recordTypes '],
+            },
+            { xmlName: 'ApexClass', directoryName: 'classes' },
+            { xmlName: '  ', directoryName: 'ignored' },
+            { xmlName: 'Ignored', directoryName: '  ' },
+        ] });
+        mockAuthCreate.mockResolvedValue({ id: 'auth' });
+        mockConnCreate.mockResolvedValue(conn);
+
+        await expect(describeMetadataObjects('C:/root', 'user@example.com')).resolves.toEqual([
+            {
+                xmlName: 'CustomObject',
+                directoryName: 'objects',
+                suffix: 'object',
+                inFolder: false,
+                metaFile: true,
+                childXmlNames: [' fields ', ' recordTypes '],
+            },
+            { xmlName: 'ApexClass', directoryName: 'classes', childXmlNames: [] },
+        ]);
+        expect(conn.metadata.describe).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns an empty description unchanged', async () => {
+        const conn = createMockConnection();
+        conn.metadata.describe.mockResolvedValue({ metadataObjects: [] });
+        mockAuthCreate.mockResolvedValue({ id: 'auth' });
+        mockConnCreate.mockResolvedValue(conn);
+
+        await expect(describeMetadataObjects('C:/root', 'user@example.com')).resolves.toEqual([]);
+    });
+
+    it('propagates metadata describe failures', async () => {
+        const conn = createMockConnection();
+        conn.metadata.describe.mockRejectedValue(new Error('describe failed'));
+        mockAuthCreate.mockResolvedValue({ id: 'auth' });
+        mockConnCreate.mockResolvedValue(conn);
+
+        await expect(describeMetadataObjects('C:/root', 'user@example.com')).rejects.toThrow('describe failed');
+    });
+
+    it('rejects when already aborted', async () => {
+        const signal = AbortSignal.abort();
+        await expect(describeMetadataObjects('C:/root', 'user@example.com', signal)).rejects.toThrow('aborted');
+        expect(mockAuthCreate).not.toHaveBeenCalled();
+    });
+
+    it('reuses the cached connection for the same root and username', async () => {
+        const conn = createMockConnection();
+        conn.metadata.describe.mockResolvedValue({ metadataObjects: [] });
+        mockAuthCreate.mockResolvedValue({ id: 'auth' });
+        mockConnCreate.mockResolvedValue(conn);
+
+        await describeMetadataObjects('C:/root', 'user@example.com');
+        await describeMetadataObjects('C:/root', 'user@example.com');
+
+        expect(mockConnCreate).toHaveBeenCalledTimes(1);
+        expect(conn.metadata.describe).toHaveBeenCalledTimes(2);
     });
 });
 

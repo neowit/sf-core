@@ -21,6 +21,15 @@ export interface RestRequest {
     headers: Record<string, string>;
 }
 
+export interface MetadataObjectDescription {
+    xmlName: string;
+    directoryName: string;
+    suffix?: string;
+    inFolder?: boolean;
+    metaFile?: boolean;
+    childXmlNames: string[];
+}
+
 type RawConnection = Awaited<ReturnType<typeof SalesforceCore.Connection.create>>;
 
 type CacheEntry = {
@@ -117,6 +126,31 @@ export async function requestRest<T>(
     const result = await connection.request<T>(request);
     checkAborted(signal);
     return result;
+}
+
+export async function describeMetadataObjects(
+    wsRoot: string,
+    username: string,
+    signal?: AbortSignal
+): Promise<MetadataObjectDescription[]> {
+    checkAborted(signal);
+    const connection = await getCachedRawConnection(wsRoot, username, signal);
+    checkAborted(signal);
+    const { metadataObjects } = await connection.metadata.describe();
+    checkAborted(signal);
+    return metadataObjects.flatMap((description) => {
+        const xmlName = description.xmlName?.trim();
+        const directoryName = description.directoryName?.trim();
+        if (!xmlName || !directoryName) return [];
+        return [{
+            xmlName,
+            directoryName,
+            ...(description.suffix != null ? { suffix: description.suffix } : {}),
+            ...(description.inFolder !== undefined ? { inFolder: description.inFolder } : {}),
+            ...(description.metaFile !== undefined ? { metaFile: description.metaFile } : {}),
+            childXmlNames: description.childXmlNames ?? [],
+        }];
+    });
 }
 
 export function resetConnectionCacheForTests(): void {
