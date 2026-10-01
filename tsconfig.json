@@ -4,6 +4,7 @@
     "target": "ES2020",
     "module": "CommonJS",
     "strict": true,
+    "skipLibCheck": true,
     "rootDir": "src",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
