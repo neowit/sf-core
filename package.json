@@ -15,6 +15,9 @@
     "@salesforce/core": "8.32.2",
     "@salesforce/source-deploy-retrieve": "12.37.2"
   },
+  "overrides": {
+    "basic-ftp": "^6.2.1"
+  },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
