@@ -355,6 +355,34 @@ describe('listMetadataMembers direct listing', () => {
         conn.metadata.describe.mockResolvedValue({ metadataObjects: [{ xmlName: typeName, inFolder: false }] });
     }
 
+    it.each(['StandardValueSet', 'BotVersion', ' standardvalueset ', ' bOtVeRsIoN '])(
+        'rejects unsupported member listing for %s before creating a connection or querying metadata',
+        async (typeName) => {
+            const requestedType = typeName.trim();
+            const conn = createMockConnection();
+            conn.metadata.describe.mockResolvedValue({ metadataObjects: [{ xmlName: requestedType, inFolder: false }] });
+            conn.metadata.list.mockResolvedValue([]);
+            mockAuthCreate.mockResolvedValue({ id: 'auth' });
+            mockConnCreate.mockResolvedValue(conn);
+
+            await expect(listMetadataMembers('C:/root', 'user@example.com', typeName)).rejects.toThrow(
+                `Metadata member listing for type '${requestedType}' is unsupported because Metadata API list does not enumerate this type. Retrieve the full type instead of selecting individual members.`
+            );
+            expect(mockAuthCreate).not.toHaveBeenCalled();
+            expect(mockConnCreate).not.toHaveBeenCalled();
+            expect(conn.metadata.describe).not.toHaveBeenCalled();
+            expect(conn.metadata.list).not.toHaveBeenCalled();
+        }
+    );
+
+    it.each(['StandardValueSet', 'BotVersion'])('gives abort precedence over unsupported type %s', async (typeName) => {
+        await expect(listMetadataMembers('C:/root', 'user@example.com', typeName, AbortSignal.abort())).rejects.toThrow(
+            'Operation aborted.'
+        );
+        expect(mockAuthCreate).not.toHaveBeenCalled();
+        expect(mockConnCreate).not.toHaveBeenCalled();
+    });
+
     it('normalizes array responses with trimming, dedup, blank omission, and sorting', async () => {
         const conn = createMockConnection();
         mockDirectDescribe(conn, 'ApexClass');

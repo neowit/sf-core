@@ -204,9 +204,14 @@ export async function listMetadataMembers(
     signal?: AbortSignal
 ): Promise<MetadataComponentMember[]> {
     checkAborted(signal);
-    const connection = await getCachedRawConnection(wsRoot, username, signal);
-    checkAborted(signal);
     const requestedType = typeName.trim();
+    if (['standardvalueset', 'botversion'].includes(requestedType.toLowerCase())) {
+        throw new Error(
+            `Metadata member listing for type '${requestedType}' is unsupported because Metadata API list does not enumerate this type. ` +
+            'Retrieve the full type instead of selecting individual members.'
+        );
+    }
+    const connection = await getCachedRawConnection(wsRoot, username, signal);
     checkAborted(signal);
     const { metadataObjects } = await connection.metadata.describe();
     checkAborted(signal);
