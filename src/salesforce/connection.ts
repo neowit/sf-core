@@ -163,19 +163,7 @@ export interface MetadataComponentMember {
     fileName?: string;
 }
 
-// listMetadata() accepts up to 3 queries per call with no pagination support
-// (https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_listmetadata.htm).
-// Treat a full page as potentially incomplete and force type-wide retrieve.
-const LIST_RESULT_LIMIT = 1000;
-
-function cappedListError(typeName: string): Error {
-    return new Error(
-        `Metadata list for type '${typeName}' reached the ${LIST_RESULT_LIMIT}-item limit and may be incomplete. ` +
-        'Retry the listing or retrieve the full type instead of selecting individual members.'
-    );
-}
-
-function normalizeMembers(raw: unknown): { members: MetadataComponentMember[]; rawCount: number } {
+function normalizeMembers(raw: unknown): MetadataComponentMember[] {
     const entries: unknown[] = raw == null ? [] : Array.isArray(raw) ? raw : [raw];
     const seen = new Set<string>();
     const members: MetadataComponentMember[] = [];
@@ -194,7 +182,7 @@ function normalizeMembers(raw: unknown): { members: MetadataComponentMember[]; r
         }
     }
     members.sort((a, b) => (a.fullName < b.fullName ? -1 : a.fullName > b.fullName ? 1 : 0));
-    return { members, rawCount: entries.length };
+    return members;
 }
 
 export async function listMetadataMembers(
@@ -225,9 +213,7 @@ export async function listMetadataMembers(
         checkAborted(signal);
         const raw = await connection.metadata.list({ type: requestedType }, apiVersion);
         checkAborted(signal);
-        const normalized = normalizeMembers(raw);
-        if (normalized.rawCount >= LIST_RESULT_LIMIT) throw cappedListError(requestedType);
-        return normalized.members;
+        return normalizeMembers(raw);
     }
     let registryAccess: RegistryAccess | undefined;
     try {
@@ -257,16 +243,14 @@ export async function listMetadataMembers(
     const rawFolders = await connection.metadata.list({ type: folderTypeName }, apiVersion);
     checkAborted(signal);
     const folders = normalizeMembers(rawFolders);
-    if (folders.rawCount >= LIST_RESULT_LIMIT) throw cappedListError(folderTypeName);
-    if (folders.members.length === 0) return [];
+    if (folders.length === 0) return [];
     const collected = new Map<string, MetadataComponentMember>();
-    for (const folder of folders.members) {
+    for (const folder of folders) {
         checkAborted(signal);
         const rawMembers = await connection.metadata.list({ type: requestedType, folder: folder.fullName }, apiVersion);
         checkAborted(signal);
-        const normalized = normalizeMembers(rawMembers);
-        if (normalized.rawCount >= LIST_RESULT_LIMIT) throw cappedListError(requestedType);
-        for (const member of normalized.members) {
+        const members = normalizeMembers(rawMembers);
+        for (const member of members) {
             if (!collected.has(member.fullName)) collected.set(member.fullName, member);
         }
     }

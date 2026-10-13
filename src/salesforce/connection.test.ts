@@ -595,15 +595,21 @@ describe('listMetadataMembers direct listing', () => {
         expect(conn.metadata.list).not.toHaveBeenCalled();
     });
 
-    it('rejects a capped direct response without claiming completeness', async () => {
+    it('returns all members from a direct response with more than 1000 entries', async () => {
         const conn = createMockConnection();
         mockDirectDescribe(conn, 'ApexClass');
-        const capped = Array.from({ length: 1000 }, (_, index) => ({ fullName: `Class${index}` }));
-        conn.metadata.list.mockResolvedValue(capped);
+        const rawMembers = Array.from({ length: 1001 }, (_, index) => ({
+            fullName: `Class${String(index).padStart(4, '0')}`,
+        }));
+        conn.metadata.list.mockResolvedValue(rawMembers);
         mockAuthCreate.mockResolvedValue({ id: 'auth' });
         mockConnCreate.mockResolvedValue(conn);
 
-        await expect(listMetadataMembers('C:/root', 'user@example.com', 'ApexClass')).rejects.toThrow(/full type|incomplete|1000/i);
+        const members = await listMetadataMembers('C:/root', 'user@example.com', 'ApexClass');
+
+        expect(members).toHaveLength(1001);
+        expect(members[0]).toEqual({ fullName: 'Class0000' });
+        expect(members[1000]).toEqual({ fullName: 'Class1000' });
     });
 });
 
@@ -757,45 +763,45 @@ describe('listMetadataMembers folder traversal', () => {
         expect(conn.metadata.list).not.toHaveBeenCalled();
     });
 
-    it('rejects a capped folder member response without claiming completeness', async () => {
+    it('returns all folder members when one folder has more than 1000 entries', async () => {
         const conn = createMockConnection();
         mockFolderDescribe(conn);
         conn.metadata.list.mockImplementation(async (query: { type: string; folder?: string }) => {
             if (query.type === 'ReportFolder') return [{ fullName: 'Big' }];
-            return Array.from({ length: 1000 }, (_, index) => ({ fullName: `Big/R${index}` }));
+            return Array.from({ length: 1001 }, (_, index) => ({
+                fullName: `Big/R${String(index).padStart(4, '0')}`,
+            }));
         });
         mockAuthCreate.mockResolvedValue({ id: 'auth' });
         mockConnCreate.mockResolvedValue(conn);
 
-        await expect(listMetadataMembers('C:/root', 'user@example.com', 'Report')).rejects.toThrow(/full type|incomplete|1000/i);
+        const members = await listMetadataMembers('C:/root', 'user@example.com', 'Report');
+
+        expect(members).toHaveLength(1001);
+        expect(members[0]).toEqual({ fullName: 'Big/R0000' });
+        expect(members[1000]).toEqual({ fullName: 'Big/R1000' });
     });
 
-    it('rejects a capped folder list with zero member calls', async () => {
+    it('processes more than 1000 folders', async () => {
         const conn = createMockConnection();
         mockFolderDescribe(conn);
+        const folderNames = Array.from({ length: 1001 }, (_, index) => `Folder${String(index).padStart(4, '0')}`);
+        const queriedFolders: string[] = [];
         conn.metadata.list.mockImplementation(async (query: { type: string; folder?: string }) => {
             if (query.type === 'ReportFolder') {
-                return Array.from({ length: 1000 }, (_, index) => ({ fullName: `Folder${index}` }));
+                return folderNames.map((fullName) => ({ fullName }));
             }
-            throw new Error(`unexpected member query ${JSON.stringify(query)}`);
+            if (query.folder) queriedFolders.push(query.folder);
+            return [];
         });
         mockAuthCreate.mockResolvedValue({ id: 'auth' });
         mockConnCreate.mockResolvedValue(conn);
 
-        await expect(listMetadataMembers('C:/root', 'user@example.com', 'Report')).rejects.toThrow(/full type|incomplete|1000/i);
-        expect(conn.metadata.list).toHaveBeenCalledTimes(1);
+        await expect(listMetadataMembers('C:/root', 'user@example.com', 'Report')).resolves.toEqual([]);
+        expect(conn.metadata.list).toHaveBeenCalledTimes(1002);
         expect(conn.metadata.list).toHaveBeenCalledWith({ type: 'ReportFolder' }, '62.0');
-    });
-
-    it('accepts a below-cap direct response', async () => {
-        const conn = createMockConnection();
-        conn.metadata.describe.mockResolvedValue({ metadataObjects: [{ xmlName: 'ApexClass', inFolder: false }] });
-        conn.metadata.list.mockResolvedValue(Array.from({ length: 999 }, (_, index) => ({ fullName: `Class${index}` })));
-        mockAuthCreate.mockResolvedValue({ id: 'auth' });
-        mockConnCreate.mockResolvedValue(conn);
-
-        const members = await listMetadataMembers('C:/root', 'user@example.com', 'ApexClass');
-        expect(members).toHaveLength(999);
-        expect(members[0]).toEqual({ fullName: 'Class0' });
+        expect(queriedFolders).toHaveLength(1001);
+        expect(queriedFolders[0]).toBe('Folder0000');
+        expect(queriedFolders[1000]).toBe('Folder1000');
     });
 });
