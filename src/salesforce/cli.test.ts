@@ -3,7 +3,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, windowsCmdArgs } from './cli';
+import { runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, resolveWindowsSf, windowsCmdArgs } from './cli';
 import * as salesforceIndex from './index';
 
 type MockProc = EventEmitter & {
@@ -18,6 +18,35 @@ function createMockProc(): MockProc {
     proc.stderr = new EventEmitter();
     proc.kill = jest.fn();
     return proc;
+}
+
+// A dummy sf.cmd first on this file's PATH, so the Windows resolver finds one.
+// Spawn is mocked in every test that uses it: the dummy never runs.
+const PATH_KEY = Object.keys(process.env).find(name => name.toLowerCase() === 'path') ?? 'PATH';
+let dummyBin = '';
+let savedPath: string | undefined;
+beforeAll(() => {
+    dummyBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-bin-'));
+    fs.writeFileSync(path.join(dummyBin, 'sf.cmd'), '@echo off\r\nexit /b 0\r\n');
+});
+afterAll(() => {
+    fs.rmSync(dummyBin, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+});
+beforeEach(() => {
+    savedPath = process.env[PATH_KEY];
+    process.env[PATH_KEY] = `${dummyBin}${path.delimiter}${savedPath ?? ''}`;
+});
+afterEach(() => {
+    if (savedPath === undefined) delete process.env[PATH_KEY];
+    else process.env[PATH_KEY] = savedPath;
+});
+
+function mockSpawn(onSpawn?: (proc: MockProc) => void): jest.SpyInstance {
+    const proc = createMockProc();
+    return jest.spyOn(cp, 'spawn').mockImplementation((() => {
+        setImmediate(() => { if (onSpawn) onSpawn(proc); else proc.emit('close', 0); });
+        return proc as unknown as cp.ChildProcessWithoutNullStreams;
+    }) as unknown as typeof cp.spawn);
 }
 
 describe('runCli', () => {
@@ -58,8 +87,9 @@ describe('runCli', () => {
         const [file, spawnArgs, options] = spawnSpy.mock.calls[0] as unknown as [string, string[], cp.SpawnOptions];
         if (process.platform === 'win32') {
             expect(file).toBe('cmd.exe');
-            expect(spawnArgs).toEqual(windowsCmdArgs(['org', 'display', 'C:/path with spaces']));
-            expect(spawnArgs.slice(0, 3)).toEqual(['/d', '/s', '/c']);
+            expect(spawnArgs).toEqual(windowsCmdArgs(path.join(dummyBin, 'sf.cmd'), ['org', 'display', 'C:/path with spaces']));
+            expect(spawnArgs.slice(0, 4)).toEqual(['/d', '/v:off', '/s', '/c']);
+            expect(spawnArgs[4].startsWith(`""${path.join(dummyBin, 'sf.cmd')}" `)).toBe(true);
             expect(options).toEqual(expect.objectContaining({ windowsVerbatimArguments: true }));
         } else {
             expect(file).toBe('sf');
@@ -99,34 +129,76 @@ describe('escapeWindowsCmdArgument', () => {
     });
 });
 
+const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
+
+windowsOnly('resolveWindowsSf', () => {
+    let base = '';
+    beforeAll(() => {
+        base = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-resolve-'));
+        for (const name of ['project', path.join('project', 'bin'), 'tools', 'empty']) fs.mkdirSync(path.join(base, name));
+        for (const name of ['project', path.join('project', 'bin'), 'tools']) fs.writeFileSync(path.join(base, name, 'sf.cmd'), '@echo off\r\n');
+    });
+    afterAll(() => {
+        fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    });
+
+    it('skips relative entries and directories at or inside the working directory', () => {
+        const project = path.join(base, 'project');
+        const env = { PATH: ['.', 'project', project, path.join(project, 'bin'), `"${path.join(base, 'empty')}"`, path.join(base, 'tools')].join(';') };
+        expect(resolveWindowsSf(project, env)).toBe(path.join(base, 'tools', 'sf.cmd'));
+    });
+
+    it('returns undefined when only the working directory has sf.cmd', () => {
+        const project = path.join(base, 'project');
+        expect(resolveWindowsSf(project, { Path: `${project};${path.join(base, 'empty')}` })).toBeUndefined();
+    });
+
+    it('makes runCli fail closed without spawning when sf.cmd cannot be resolved', async () => {
+        const spawnSpy = mockSpawn();
+        process.env[PATH_KEY] = path.join(base, 'empty');
+        await expect(runCli(['org'], path.join(base, 'project'))).rejects.toThrow('sf.cmd was not found');
+        expect(spawnSpy).not.toHaveBeenCalled();
+        jest.restoreAllMocks();
+    });
+});
+
 // Real cmd.exe round trip of the exact launch runCli performs (cmd.exe with
 // windowsCmdArgs and windowsVerbatimArguments; see the routing test above)
 // through inert shims shaped like the Salesforce CLI installer's sf.cmd: an
 // outer shim that calls an inner shim with %*, which runs node with %*.
-// The environment is passed explicitly: Jest's per-file process.env copy does
-// not reach child processes, and the real sf must never be found.
-const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
+// The working directory holds a hostile sf.cmd that must never run, and the
+// child environment is explicit: no real sf can be found.
 windowsOnly('Windows cmd.exe launch through batch shims', () => {
     let dir = '';
+    let work = '';
     let env: NodeJS.ProcessEnv = {};
 
     beforeAll(() => {
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-cmd-'));
+        work = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-work-'));
         fs.writeFileSync(path.join(dir, 'argv.js'), 'process.stdout.write("MWARGV" + JSON.stringify(process.argv.slice(2)));\n');
         fs.writeFileSync(path.join(dir, 'inner.cmd'), `@echo off\r\n"${process.execPath}" "%~dp0argv.js" %*\r\n`);
         fs.writeFileSync(path.join(dir, 'sf.cmd'),
             '@echo off\r\nsetlocal enableextensions\r\nif exist "%~dp0inner.cmd" (\r\n  "%~dp0inner.cmd" %*\r\n) else (\r\n  echo missing inner\r\n)\r\n');
-        // Only the fake directory and the system directory: no real sf on PATH.
+        fs.writeFileSync(path.join(work, 'sf.cmd'), '@echo off\r\necho HIJACKED\r\n');
         const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
-        env = { SystemRoot: systemRoot, ComSpec: path.join(systemRoot, 'System32', 'cmd.exe'), PATHEXT: '.COM;.EXE;.BAT;.CMD', PATH: `${dir};${path.join(systemRoot, 'System32')}` };
+        env = {
+            SystemRoot: systemRoot,
+            ComSpec: path.join(systemRoot, 'System32', 'cmd.exe'),
+            PATHEXT: '.COM;.EXE;.BAT;.CMD',
+            PATH: `${work};${dir};${path.join(systemRoot, 'System32')}`,
+        };
     });
 
     afterAll(() => {
         fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        fs.rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     });
 
     function launch(args: string[]): { exitCode: number | null; stdout: string; stderr: string } {
-        const result = cp.spawnSync('cmd.exe', windowsCmdArgs(args), { cwd: dir, env, windowsVerbatimArguments: true, encoding: 'utf8' });
+        const sfPath = resolveWindowsSf(work, env);
+        if (sfPath !== path.join(dir, 'sf.cmd')) throw new Error(`resolved ${String(sfPath)}, refusing to launch`);
+        const result = cp.spawnSync('cmd.exe', windowsCmdArgs(sfPath, args), { cwd: work, env, windowsVerbatimArguments: true, encoding: 'utf8' });
         return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
     }
 
@@ -147,10 +219,8 @@ windowsOnly('Windows cmd.exe launch through batch shims', () => {
         }
     });
 
-    it('refuses arguments with a double quote or line break before launching', async () => {
-        for (const unsafe of ['q"&echo.MWINJECTED', '"quoted"', 'line\nbreak', 'cr\rx']) {
-            await expect(runCli(['org', unsafe], dir)).rejects.toThrow('Refusing to run sf');
-        }
+    it('never runs a sf.cmd from the working directory', () => {
+        expect(launch(['org']).stdout).toBe('MWARGV["org"]');
     });
 });
 
@@ -159,20 +229,19 @@ describe('runCli unsafe Windows arguments', () => {
         jest.restoreAllMocks();
     });
 
-    it('rejects on Windows without spawning, and passes them through elsewhere', async () => {
-        const proc = createMockProc();
-        const spawnSpy = jest.spyOn(cp, 'spawn').mockImplementation((() => {
-            setImmediate(() => proc.emit('close', 0));
-            return proc as unknown as cp.ChildProcessWithoutNullStreams;
-        }) as unknown as typeof cp.spawn);
-        const run = runCli(['data', 'query', '--query', 'say "hi"'], 'C:/root');
-        if (process.platform === 'win32') {
-            await expect(run).rejects.toThrow('Refusing to run sf');
-            expect(spawnSpy).not.toHaveBeenCalled();
-        } else {
-            await expect(run).resolves.toMatchObject({ exitCode: 0 });
+    it.each(['q"&echo.MWINJECTED', '"quoted"', 'say "hi"', 'line\nbreak', 'cr\rx'])(
+        'rejects %j on Windows without spawning, and passes it through elsewhere',
+        async unsafe => {
+            const spawnSpy = mockSpawn();
+            const run = runCli(['data', 'query', '--query', unsafe], 'C:/root');
+            if (process.platform === 'win32') {
+                await expect(run).rejects.toThrow('Refusing to run sf');
+                expect(spawnSpy).not.toHaveBeenCalled();
+            } else {
+                await expect(run).resolves.toMatchObject({ exitCode: 0 });
+            }
         }
-    });
+    );
 });
 
 describe('parseCliJson', () => {

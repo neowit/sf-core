@@ -28,8 +28,10 @@ server. Say which source you used.
 - **On Windows every argument is quoted and caret-escaped for cmd.exe**
   (`windowsCmdArgs`): `sf` is a batch shim, so cmd.exe parses the line more
   than once. Arguments containing a double quote or line break are refused
-  before launch; no escaping survives the installer's nested shims. Keep the
-  real round-trip test in `cli.test.ts` passing.
+  before launch; no escaping survives the installer's nested shims. `sf.cmd`
+  is run by absolute path from an absolute PATH directory outside the working
+  directory (`resolveWindowsSf`), never from the project; if none is found,
+  the launch fails. Keep the real round-trip test in `cli.test.ts` passing.
 - **`sf` CLI v2 only, never `sfdx`.**
 - **All HTTP to Salesforce goes through `src/salesforce/connection.ts`.** No
   tokens in logs, errors, telemetry or tests.
