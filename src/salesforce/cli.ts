@@ -52,6 +52,15 @@ function isSameOrInside(candidate: string, directory: string): boolean {
     return child === parent || child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
 }
 
+/**
+ * Fully qualified Windows path: `C:\...` or `\\server\share\...`. Node's
+ * isAbsolute also accepts `\dir` and `/dir`, which are relative to the current
+ * drive, so the directory a child searches could differ from the one checked.
+ */
+export function isFullyQualifiedWindowsPath(value: string): boolean {
+    return /^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+/.test(value);
+}
+
 function realOrUndefined(target: string): string | undefined {
     try {
         return fs.realpathSync(target);
@@ -65,21 +74,25 @@ function realOrUndefined(target: string): string | undefined {
  * commands (for example a `node` fallback), so cmd.exe must never find an
  * executable in the working directory (the user's project):
  * NoDefaultCurrentDirectoryInExePath=1 stops the current-directory search, and
- * PATH keeps only absolute entries that are not at or inside the working
- * directory, lexically or by real path. Module-internal; exported for tests.
+ * PATH keeps only fully qualified entries whose real location is verified and
+ * not at or inside the working directory, lexically or by real path. The child
+ * gets exactly the normalized paths that were checked. Module-internal;
+ * exported for tests.
  */
 export function windowsChildEnv(cwd: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
     const project = path.win32.resolve(cwd);
     const projectReal = realOrUndefined(project) ?? project;
     const pathKey = Object.keys(env).find(name => name.toLowerCase() === 'path') ?? 'Path';
-    const kept = (envValue(env, 'PATH') ?? '').split(';').filter(raw => {
+    const kept: string[] = [];
+    for (const raw of (envValue(env, 'PATH') ?? '').split(';')) {
         const entry = raw.trim().replace(/^"(.*)"$/, '$1');
-        if (entry === '' || !path.win32.isAbsolute(entry)) return false;
+        if (entry === '' || !isFullyQualifiedWindowsPath(entry)) continue;
         const dir = path.win32.resolve(entry);
-        if (isSameOrInside(dir, project) || isSameOrInside(dir, projectReal)) return false;
+        if (isSameOrInside(dir, project) || isSameOrInside(dir, projectReal)) continue;
         const real = realOrUndefined(dir);
-        return real === undefined || !(isSameOrInside(real, project) || isSameOrInside(real, projectReal));
-    });
+        if (real === undefined || isSameOrInside(real, project) || isSameOrInside(real, projectReal)) continue;
+        if (!kept.some(existing => existing.toLowerCase() === dir.toLowerCase())) kept.push(dir);
+    }
     const child: NodeJS.ProcessEnv = {};
     for (const [name, value] of Object.entries(env)) {
         const lower = name.toLowerCase();
@@ -98,7 +111,7 @@ export function windowsChildEnv(cwd: string, env: NodeJS.ProcessEnv = process.en
  */
 export function resolveWindowsCmd(env: NodeJS.ProcessEnv = process.env): string | undefined {
     const systemRoot = envValue(env, 'SystemRoot') ?? envValue(env, 'windir');
-    if (!systemRoot || !path.win32.isAbsolute(systemRoot)) return undefined;
+    if (!systemRoot || !isFullyQualifiedWindowsPath(systemRoot)) return undefined;
     const cmd = path.win32.join(path.win32.resolve(systemRoot), 'System32', 'cmd.exe');
     try {
         return fs.statSync(cmd).isFile() ? cmd : undefined;
@@ -125,7 +138,7 @@ export function resolveWindowsSf(cwd: string, env: NodeJS.ProcessEnv = process.e
     }
     for (const raw of (envValue(env, 'PATH') ?? '').split(';')) {
         const entry = raw.trim().replace(/^"(.*)"$/, '$1');
-        if (entry === '' || !path.win32.isAbsolute(entry)) continue;
+        if (entry === '' || !isFullyQualifiedWindowsPath(entry)) continue;
         const dir = path.win32.resolve(entry);
         if (isSameOrInside(dir, project) || isSameOrInside(dir, projectReal)) continue;
         const candidate = path.win32.join(dir, 'sf.cmd');

@@ -3,7 +3,10 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, resolveWindowsCmd, resolveWindowsSf, windowsChildEnv, windowsCmdArgs } from './cli';
+import {
+    runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, isFullyQualifiedWindowsPath,
+    resolveWindowsCmd, resolveWindowsSf, windowsChildEnv, windowsCmdArgs,
+} from './cli';
 import * as salesforceIndex from './index';
 
 type MockProc = EventEmitter & {
@@ -209,10 +212,29 @@ windowsOnly('resolveWindowsSf', () => {
         const child = windowsChildEnv(project, env);
         const pathKeys = Object.keys(child).filter(name => name.toLowerCase() === 'path');
         expect(pathKeys).toEqual(['Path']);
-        expect(child.Path).toBe(`"${tools}"`);
+        // The child gets the normalized path that was checked.
+        expect(child.Path).toBe(tools);
         expect(Object.keys(child).filter(name => name.toLowerCase() === 'nodefaultcurrentdirectoryinexepath')).toEqual(['NoDefaultCurrentDirectoryInExePath']);
         expect(child.NoDefaultCurrentDirectoryInExePath).toBe('1');
         expect(child.KEEP_ME).toBe('yes');
+    });
+
+    it('accepts only fully qualified Windows paths', () => {
+        for (const ok of ['C:\\tools', 'c:/tools', '\\\\server\\share\\bin', '//server/share']) {
+            expect(isFullyQualifiedWindowsPath(ok)).toBe(true);
+        }
+        for (const bad of ['\\tools', '/tools', 'C:tools', 'tools', '.', '\\\\server', '']) {
+            expect(isFullyQualifiedWindowsPath(bad)).toBe(false);
+        }
+    });
+
+    it('drops drive-relative and unverifiable entries (cross-drive working directory)', () => {
+        // The server may run on C: while the project is on another drive: a
+        // `\dir` entry would be checked on one drive and searched on another.
+        const tools = path.join(base, 'tools');
+        const env = { PATH: ['\\proj\\bin', '/proj/bin', 'D:proj', path.join(base, 'does-not-exist'), tools].join(';') };
+        expect(windowsChildEnv('D:\\proj', env).PATH).toBe(tools);
+        expect(resolveWindowsSf(path.join(base, 'project'), { PATH: `\\${path.relative(path.parse(tools).root, tools)}` })).toBeUndefined();
     });
 
     it('drops a PATH entry whose real location is inside the working directory', () => {
