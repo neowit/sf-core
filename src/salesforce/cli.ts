@@ -41,34 +41,66 @@ export function windowsCmdArgs(sfPath: string, args: string[]): string[] {
     return ['/d', '/v:off', '/s', '/c', `""${sfPath}" ${args.map(escapeWindowsCmdArgument).join(' ')}"`];
 }
 
-function pathValue(env: NodeJS.ProcessEnv): string {
-    const key = Object.keys(env).find(name => name.toLowerCase() === 'path');
-    return (key === undefined ? undefined : env[key]) ?? '';
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === name.toLowerCase());
+    return key === undefined ? undefined : env[key];
+}
+
+function isSameOrInside(candidate: string, directory: string): boolean {
+    const child = candidate.toLowerCase();
+    const parent = directory.toLowerCase();
+    return child === parent || child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
+}
+
+/**
+ * The system cmd.exe by absolute path (%SystemRoot%\System32\cmd.exe). A bare
+ * `cmd.exe` can be found in the working directory before PATH. Module-internal;
+ * exported for tests only.
+ */
+export function resolveWindowsCmd(env: NodeJS.ProcessEnv = process.env): string | undefined {
+    const systemRoot = envValue(env, 'SystemRoot') ?? envValue(env, 'windir');
+    if (!systemRoot || !path.win32.isAbsolute(systemRoot)) return undefined;
+    const cmd = path.win32.join(path.win32.resolve(systemRoot), 'System32', 'cmd.exe');
+    try {
+        return fs.statSync(cmd).isFile() ? cmd : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /**
  * The absolute `sf.cmd` that cmd.exe should run: the first one in an absolute
- * PATH directory outside `cwd`. A bare `sf.cmd` would let cmd.exe pick one
- * from the working directory (the user's project) first. Module-internal;
+ * PATH directory whose real location is outside the real working directory
+ * (the user's project). A bare `sf.cmd` would let cmd.exe pick one from the
+ * working directory first; a link could make a PATH entry point back into it.
+ * A candidate whose real path cannot be verified is skipped. Module-internal;
  * exported for tests only.
  */
 export function resolveWindowsSf(cwd: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-    const project = path.win32.resolve(cwd).toLowerCase();
-    const projectPrefix = project.endsWith('\\') ? project : `${project}\\`;
-    for (const raw of pathValue(env).split(';')) {
+    const project = path.win32.resolve(cwd);
+    let projectReal: string;
+    try {
+        projectReal = fs.realpathSync(project);
+    } catch {
+        return undefined;
+    }
+    for (const raw of (envValue(env, 'PATH') ?? '').split(';')) {
         const entry = raw.trim().replace(/^"(.*)"$/, '$1');
         if (entry === '' || !path.win32.isAbsolute(entry)) continue;
         const dir = path.win32.resolve(entry);
-        const key = dir.toLowerCase();
-        if (key === project || key.startsWith(projectPrefix)) continue;
+        if (isSameOrInside(dir, project) || isSameOrInside(dir, projectReal)) continue;
         const candidate = path.win32.join(dir, 'sf.cmd');
         // `%` would be expanded inside the quoted command path.
         if (candidate.includes('%')) continue;
+        let candidateReal: string;
         try {
-            if (fs.statSync(candidate).isFile()) return candidate;
+            if (!fs.statSync(candidate).isFile()) continue;
+            candidateReal = fs.realpathSync(candidate);
         } catch {
-            // Not in this directory.
+            continue; // Missing here, or its real location cannot be verified.
         }
+        if (isSameOrInside(candidateReal, projectReal) || isSameOrInside(candidateReal, project)) continue;
+        return candidate;
     }
     return undefined;
 }
@@ -88,13 +120,17 @@ export async function runCli(args: string[], cwd: string, options?: CliOptions):
     if (unsafe !== undefined) {
         throw new Error(`Refusing to run sf: an argument contains a double quote or line break, which cannot be passed safely through cmd.exe: ${JSON.stringify(unsafe)}`);
     }
+    const cmdPath = windows ? resolveWindowsCmd() : undefined;
+    if (windows && cmdPath === undefined) {
+        throw new Error('Refusing to run sf: the system cmd.exe (%SystemRoot%\\System32\\cmd.exe) was not found.');
+    }
     const sfPath = windows ? resolveWindowsSf(cwd) : undefined;
     if (windows && sfPath === undefined) {
         throw new Error('sf.cmd was not found in a PATH directory outside the project (is the Salesforce CLI installed?)');
     }
     return new Promise((resolve, reject) => {
-        const proc = windows && sfPath !== undefined
-            ? cp.spawn('cmd.exe', windowsCmdArgs(sfPath, args), { cwd, shell: false, windowsVerbatimArguments: true })
+        const proc = windows && cmdPath !== undefined && sfPath !== undefined
+            ? cp.spawn(cmdPath, windowsCmdArgs(sfPath, args), { cwd, shell: false, windowsVerbatimArguments: true })
             : cp.spawn('sf', args, { cwd, shell: false });
         let stdout = '', stderr = '', settled = false;
         const timer = options?.timeoutMs === undefined ? undefined : setTimeout(() => {
