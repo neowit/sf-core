@@ -52,6 +52,45 @@ function isSameOrInside(candidate: string, directory: string): boolean {
     return child === parent || child.startsWith(parent.endsWith('\\') ? parent : `${parent}\\`);
 }
 
+function realOrUndefined(target: string): string | undefined {
+    try {
+        return fs.realpathSync(target);
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * The environment for the cmd.exe child. The sf.cmd shims may run bare
+ * commands (for example a `node` fallback), so cmd.exe must never find an
+ * executable in the working directory (the user's project):
+ * NoDefaultCurrentDirectoryInExePath=1 stops the current-directory search, and
+ * PATH keeps only absolute entries that are not at or inside the working
+ * directory, lexically or by real path. Module-internal; exported for tests.
+ */
+export function windowsChildEnv(cwd: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+    const project = path.win32.resolve(cwd);
+    const projectReal = realOrUndefined(project) ?? project;
+    const pathKey = Object.keys(env).find(name => name.toLowerCase() === 'path') ?? 'Path';
+    const kept = (envValue(env, 'PATH') ?? '').split(';').filter(raw => {
+        const entry = raw.trim().replace(/^"(.*)"$/, '$1');
+        if (entry === '' || !path.win32.isAbsolute(entry)) return false;
+        const dir = path.win32.resolve(entry);
+        if (isSameOrInside(dir, project) || isSameOrInside(dir, projectReal)) return false;
+        const real = realOrUndefined(dir);
+        return real === undefined || !(isSameOrInside(real, project) || isSameOrInside(real, projectReal));
+    });
+    const child: NodeJS.ProcessEnv = {};
+    for (const [name, value] of Object.entries(env)) {
+        const lower = name.toLowerCase();
+        if (lower === 'path' || lower === 'nodefaultcurrentdirectoryinexepath') continue;
+        child[name] = value;
+    }
+    child[pathKey] = kept.join(';');
+    child.NoDefaultCurrentDirectoryInExePath = '1';
+    return child;
+}
+
 /**
  * The system cmd.exe by absolute path (%SystemRoot%\System32\cmd.exe). A bare
  * `cmd.exe` can be found in the working directory before PATH. Module-internal;
@@ -130,7 +169,7 @@ export async function runCli(args: string[], cwd: string, options?: CliOptions):
     }
     return new Promise((resolve, reject) => {
         const proc = windows && cmdPath !== undefined && sfPath !== undefined
-            ? cp.spawn(cmdPath, windowsCmdArgs(sfPath, args), { cwd, shell: false, windowsVerbatimArguments: true })
+            ? cp.spawn(cmdPath, windowsCmdArgs(sfPath, args), { cwd, env: windowsChildEnv(cwd), shell: false, windowsVerbatimArguments: true })
             : cp.spawn('sf', args, { cwd, shell: false });
         let stdout = '', stderr = '', settled = false;
         const timer = options?.timeoutMs === undefined ? undefined : setTimeout(() => {

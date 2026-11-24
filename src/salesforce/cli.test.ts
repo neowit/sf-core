@@ -3,7 +3,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, resolveWindowsCmd, resolveWindowsSf, windowsCmdArgs } from './cli';
+import { runCli, parseCliJson, cliErrorText, escapeWindowsCmdArgument, resolveWindowsCmd, resolveWindowsSf, windowsChildEnv, windowsCmdArgs } from './cli';
 import * as salesforceIndex from './index';
 
 type MockProc = EventEmitter & {
@@ -97,6 +97,10 @@ describe('runCli', () => {
             expect(spawnArgs.slice(0, 4)).toEqual(['/d', '/v:off', '/s', '/c']);
             expect(spawnArgs[4].startsWith(`""${path.join(dummyBin, 'sf.cmd')}" `)).toBe(true);
             expect(options).toEqual(expect.objectContaining({ windowsVerbatimArguments: true }));
+            const childEnv = (options.env ?? {}) as NodeJS.ProcessEnv;
+            expect(childEnv.NoDefaultCurrentDirectoryInExePath).toBe('1');
+            const childPath = Object.entries(childEnv).find(([name]) => name.toLowerCase() === 'path')?.[1] ?? '';
+            expect(childPath.split(';')).toContain(dummyBin);
         } else {
             expect(file).toBe('sf');
             expect(spawnArgs).toEqual(['org', 'display', 'C:/path with spaces']);
@@ -191,6 +195,33 @@ windowsOnly('resolveWindowsSf', () => {
         jest.spyOn(fs, 'realpathSync').mockImplementation(((value: fs.PathLike) =>
             path.resolve(String(value)) === path.join(alias, 'sf.cmd') ? path.join(project, 'sf.cmd') : actual.realpathSync(value)) as unknown as typeof fs.realpathSync);
         expect(resolveWindowsSf(project, { PATH: alias })).toBeUndefined();
+        jest.restoreAllMocks();
+    });
+
+    it('builds a child environment without current-directory or project-local executable lookup', () => {
+        const project = path.join(base, 'project');
+        const tools = path.join(base, 'tools');
+        const env = {
+            Path: ['.', 'relative', project, path.join(project, 'bin'), `"${tools}"`, ''].join(';'),
+            NODEFAULTCURRENTDIRECTORYINEXEPATH: '0',
+            KEEP_ME: 'yes',
+        };
+        const child = windowsChildEnv(project, env);
+        const pathKeys = Object.keys(child).filter(name => name.toLowerCase() === 'path');
+        expect(pathKeys).toEqual(['Path']);
+        expect(child.Path).toBe(`"${tools}"`);
+        expect(Object.keys(child).filter(name => name.toLowerCase() === 'nodefaultcurrentdirectoryinexepath')).toEqual(['NoDefaultCurrentDirectoryInExePath']);
+        expect(child.NoDefaultCurrentDirectoryInExePath).toBe('1');
+        expect(child.KEEP_ME).toBe('yes');
+    });
+
+    it('drops a PATH entry whose real location is inside the working directory', () => {
+        const project = path.join(base, 'project');
+        const alias = path.join(base, 'tools');
+        const actual = jest.requireActual<typeof import('fs')>('fs').realpathSync;
+        jest.spyOn(fs, 'realpathSync').mockImplementation(((value: fs.PathLike) =>
+            path.resolve(String(value)) === alias ? path.join(project, 'bin') : actual(value)) as unknown as typeof fs.realpathSync);
+        expect(windowsChildEnv(project, { PATH: alias }).PATH).toBe('');
         jest.restoreAllMocks();
     });
 
@@ -290,6 +321,38 @@ windowsOnly('Windows cmd.exe launch through batch shims', () => {
 
     it('never runs a sf.cmd from the working directory', () => {
         expect(launch(['org']).stdout).toBe('MWARGV["org"]');
+    });
+
+    it('never runs a bare command the shim falls back to from the working directory or a project PATH entry', () => {
+        // A shim like the installer's inner one, ending in a bare command.
+        const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-bare-'));
+        const trusted = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-core-trusted-'));
+        try {
+            fs.writeFileSync(path.join(shimDir, 'sf.cmd'), '@echo off\r\nmwprobe %*\r\n');
+            fs.writeFileSync(path.join(trusted, 'mwprobe.cmd'), `@echo off\r\n"${process.execPath}" "${path.join(dir, 'argv.js')}" %*\r\n`);
+            fs.mkdirSync(path.join(work, 'bin'), { recursive: true });
+            for (const hostile of [path.join(work, 'mwprobe.cmd'), path.join(work, 'bin', 'mwprobe.cmd')]) {
+                fs.writeFileSync(hostile, '@echo off\r\necho HIJACKED\r\n');
+            }
+            const systemRoot = env.SystemRoot ?? 'C:\\Windows';
+            // As inherited: current-directory lookup allowed, '.' and project
+            // entries ahead of the trusted directory.
+            const inherited: NodeJS.ProcessEnv = {
+                SystemRoot: systemRoot,
+                PATHEXT: '.COM;.EXE;.BAT;.CMD',
+                PATH: ['.', path.join(work, 'bin'), work, shimDir, trusted, path.join(systemRoot, 'System32')].join(';'),
+            };
+            const sfPath = resolveWindowsSf(work, inherited);
+            const cmdPath = resolveWindowsCmd(inherited);
+            if (sfPath !== path.join(shimDir, 'sf.cmd') || cmdPath === undefined) throw new Error('fixture not resolved, refusing to launch');
+            const result = cp.spawnSync(cmdPath, windowsCmdArgs(sfPath, ['a&b', 'x']), {
+                cwd: work, env: windowsChildEnv(work, inherited), windowsVerbatimArguments: true, encoding: 'utf8',
+            });
+            expect({ exitCode: result.status, stdout: result.stdout }).toEqual({ exitCode: 0, stdout: 'MWARGV["a&b","x"]' });
+        } finally {
+            fs.rmSync(shimDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+            fs.rmSync(trusted, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        }
     });
 });
 

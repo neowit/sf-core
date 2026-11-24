@@ -32,8 +32,11 @@ server. Say which source you used.
   `cmd.exe` (`%SystemRoot%\System32`, `resolveWindowsCmd`) and `sf.cmd` (an
   absolute PATH directory whose real location is outside the real working
   directory, `resolveWindowsSf`) are run by absolute path, never from the
-  project; if either cannot be resolved, the launch fails. Keep the real
-  round-trip test in `cli.test.ts` passing.
+  project; if either cannot be resolved, the launch fails. The child
+  environment (`windowsChildEnv`) sets NoDefaultCurrentDirectoryInExePath=1
+  and drops relative and project-local PATH entries, so a bare command inside
+  a shim never resolves into the project. Keep the real round-trip tests in
+  `cli.test.ts` passing.
 - **`sf` CLI v2 only, never `sfdx`.**
 - **All HTTP to Salesforce goes through `src/salesforce/connection.ts`.** No
   tokens in logs, errors, telemetry or tests.
