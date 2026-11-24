@@ -25,6 +25,11 @@ server. Say which source you used.
   piece of work, or keep the old export.
 - **`src/salesforce/cli.ts` is the only production file that may import
   `child_process`.** Arguments are an array; `shell` stays `false`.
+- **On Windows every argument is quoted and caret-escaped for cmd.exe**
+  (`windowsCmdArgs`): `sf` is a batch shim, so cmd.exe parses the line more
+  than once. Arguments containing a double quote or line break are refused
+  before launch; no escaping survives the installer's nested shims. Keep the
+  real round-trip test in `cli.test.ts` passing.
 - **`sf` CLI v2 only, never `sfdx`.**
 - **All HTTP to Salesforce goes through `src/salesforce/connection.ts`.** No
   tokens in logs, errors, telemetry or tests.

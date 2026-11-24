@@ -12,11 +12,49 @@ export interface CliOptions {
     timeoutMs?: number;
 }
 
+// cmd.exe metacharacters. On Windows `sf` is the `sf.cmd` batch shim, so every
+// argument passes through cmd.exe twice: once for the `cmd /c` line and once
+// when the shim expands `%*`. Unescaped, a `&` or `|` in an argument ends the
+// `sf` command and runs the rest as another command.
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * Quotes one argument for the Windows argument parser, then caret-escapes the
+ * cmd.exe metacharacters for both cmd.exe passes, so the argument reaches
+ * `sf` verbatim. Module-internal; exported for tests only.
+ */
+export function escapeWindowsCmdArgument(arg: string): string {
+    // Backslashes before a quote, and at the end (before the closing quote),
+    // are doubled; the quote itself becomes \".
+    const quoted = `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')}"`;
+    return quoted.replace(CMD_META, '^$1').replace(CMD_META, '^$1');
+}
+
+/** The cmd.exe argument list that runs `sf.cmd` with `args` passed verbatim. */
+export function windowsCmdArgs(args: string[]): string[] {
+    // /d skips AutoRun commands; /s keeps the outer quotes rule simple.
+    return ['/d', '/s', '/c', `"sf.cmd ${args.map(escapeWindowsCmdArgument).join(' ')}"`];
+}
+
+/**
+ * Characters no escaping can carry through the Salesforce CLI installer's
+ * nested sf.cmd shims: each shim re-parses `%*`, and an embedded double quote
+ * flips cmd.exe's quote state there, exposing any following metacharacter.
+ * A line break ends a cmd.exe command line.
+ */
+const WINDOWS_UNSAFE_ARG = /["\r\n]/;
+
 export async function runCli(args: string[], cwd: string, options?: CliOptions): Promise<CliResult> {
     const startTime = new Date().toISOString();
+    const windows = process.platform === 'win32';
+    const unsafe = windows ? args.find(arg => WINDOWS_UNSAFE_ARG.test(arg)) : undefined;
+    if (unsafe !== undefined) {
+        throw new Error(`Refusing to run sf: an argument contains a double quote or line break, which cannot be passed safely through cmd.exe: ${JSON.stringify(unsafe)}`);
+    }
     return new Promise((resolve, reject) => {
-        const windows = process.platform === 'win32';
-        const proc = cp.spawn(windows ? 'cmd.exe' : 'sf', windows ? ['/c', 'sf.cmd', ...args] : args, { cwd, shell: false });
+        const proc = windows
+            ? cp.spawn('cmd.exe', windowsCmdArgs(args), { cwd, shell: false, windowsVerbatimArguments: true })
+            : cp.spawn('sf', args, { cwd, shell: false });
         let stdout = '', stderr = '', settled = false;
         const timer = options?.timeoutMs === undefined ? undefined : setTimeout(() => {
             if (settled) return;
